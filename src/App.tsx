@@ -408,7 +408,7 @@ export default function App() {
     }, 4000);
 
     return () => window.clearInterval(intervalId);
-  }, [selectedConcept, isDiscussionPage]);
+  }, [selectedConcept, isDiscussionPage, isBlogPage]);
 
   const goToPrevVisual = () => {
     setPrevVisualIndex(activeVisualIndex);
