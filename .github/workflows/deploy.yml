@@ -376,151 +376,30 @@ jobs:
     runs-on: ubuntu-latest
     needs: [trivy-scan, build-dist, security-scan]
     permissions:
-      contents: write
       actions: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ env.SITE_URL }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: build
           path: dist
 
-      - name: Record current gh-pages HEAD (for rollback)
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREV_SHA=$(git ls-remote --heads origin gh-pages | awk '{print $1}' | head -n1 || true)
-          echo "PREV_GHPAGES_SHA=$PREV_SHA" >> "$GITHUB_ENV"
-          echo "Previous gh-pages SHA: ${PREV_SHA:-'(none - first deployment)'}"
-
       - name: Add .nojekyll file
         run: touch dist/.nojekyll
 
-      - name: Deploy with gh-pages
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          npx --yes gh-pages -d dist -b gh-pages -t \
-            -r https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git \
-            -u "github-actions <github-actions@github.com>"
-          echo "✅ Deployed to gh-pages branch"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
 
-      - name: Health check
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="${{ env.SITE_URL }}/"
-          ORIGIN="${{ env.SITE_ORIGIN }}"
-          echo "🔍 Checking $URL ..."
-          for i in {1..24}; do
-            if ! curl -fsS -o index_out.html "$URL"; then
-              echo "Attempt $i: index fetch failed"; sleep 10; continue
-            fi
-            MAIN_JS=$(grep -Eo 'src="[^"]*\.js"' index_out.html | head -n1 | sed -E 's/src="([^"]+)"/\1/') || true
-            MAIN_CSS=$(grep -Eo 'href="[^"]*\.css"' index_out.html | head -n1 | sed -E 's/href="([^"]+)"/\1/') || true
-            make_abs() {
-              local p="$1"
-              if [[ -z "$p" ]]; then echo ""
-              elif [[ "$p" =~ ^https?:// ]]; then echo "$p"
-              elif [[ "$p" =~ ^/ ]]; then echo "${ORIGIN}$p"
-              else echo "${URL%/}/$p"
-              fi
-            }
-            JS_URL=$(make_abs "${MAIN_JS:-}")
-            CSS_URL=$(make_abs "${MAIN_CSS:-}")
-            JS_OK=false; CSS_OK=false
-            if [ -n "${JS_URL}" ]; then curl -fsSLI "$JS_URL" | grep -q "^HTTP/.* 200" && JS_OK=true || JS_OK=false; fi
-            if [ -n "${CSS_URL}" ]; then curl -fsSLI "$CSS_URL" | grep -q "^HTTP/.* 200" && CSS_OK=true || CSS_OK=false; fi
-            if $JS_OK && $CSS_OK; then
-              echo "✅ Health check passed on attempt $i (JS: $JS_URL, CSS: $CSS_URL)"
-              rm -f index_out.html
-              exit 0
-            fi
-            echo "Attempt $i: JS_OK=$JS_OK CSS_OK=$CSS_OK (retrying)"; sleep 10
-          done
-          echo "❌ Health check failed after retries"
-          cat index_out.html || true
-          exit 1
-
-      - name: Install Playwright
-        shell: bash
-        run: |
-          npm install --no-save playwright@latest
-          npx --yes playwright install --with-deps chromium
-
-      - name: Run Playwright smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-          export URL="${{ env.SITE_URL }}/"
-          cat > smoke.cjs << 'JS'
-          const { chromium } = require('playwright');
-          (async () => {
-            const browser = await chromium.launch();
-            const context = await browser.newContext();
-            const page = await context.newPage();
-            const consoleErrors = [];
-            page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
-            const targetUrl = process.env.URL;
-            console.log('Testing URL:', targetUrl);
-            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            try {
-              await page.waitForFunction(() => {
-                return document.body && document.body.textContent && document.body.textContent.trim().length > 0;
-              }, { timeout: 15000 });
-            } catch (e) {
-              await browser.close();
-              console.error('Smoke: page content did not render in time');
-              process.exit(1);
-            }
-            if (consoleErrors.length > 0) {
-              await browser.close();
-              console.error('Smoke: console errors detected:\n' + consoleErrors.join('\n'));
-              process.exit(1);
-            }
-            await browser.close();
-            console.log('✅ Smoke test passed: page rendered without console errors');
-          })();
-          JS
-          node smoke.cjs
-
-      - name: Auto rollback on failure
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${PREV_GHPAGES_SHA:-}" ]; then
-            echo "⚠️ No previous gh-pages SHA found; cannot rollback"
-            exit 1
-          fi
-          echo "🔄 Rolling back gh-pages to $PREV_GHPAGES_SHA"
-          git fetch --prune origin gh-pages
-          if git show-ref --verify --quiet refs/heads/gh-pages; then
-            git checkout gh-pages
-          else
-            git checkout -b gh-pages origin/gh-pages
-          fi
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git reset --hard "$PREV_GHPAGES_SHA"
-          git push origin gh-pages --force
-          echo "✅ Rollback complete"
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   # ===========================================================================
   # Stage 6: Verify Deployed Tag (tag-only)
