@@ -3,5 +3,7 @@ dist
 coverage
 .github
 *.md
+Dockerfile
+.dockerignore
 public
 copilot-session-*.md

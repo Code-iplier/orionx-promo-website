@@ -29,6 +29,9 @@ import {
   Toolbar,
   Typography,
   createTheme,
+  type SxProps,
+  type Theme,
+  type TypographyProps,
 } from '@mui/material';
 import PublicIcon from '@mui/icons-material/Public';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
@@ -65,10 +68,10 @@ function TypewriterText({
   text: string;
   speed?: number;
   startDelay?: number;
-  variant?: string;
+  variant?: TypographyProps['variant'];
   color?: string;
   component?: ElementType;
-  sx?: any;
+  sx?: SxProps<Theme>;
 }) {
   const [displayed, setDisplayed] = useState('');
   const [started, setStarted] = useState(false);
@@ -106,7 +109,7 @@ function TypewriterText({
   return (
     <Typography
       ref={ref}
-      variant={variant as any}
+      variant={variant}
       color={color}
       component={component}
       sx={sx}
@@ -405,7 +408,7 @@ export default function App() {
     }, 4000);
 
     return () => window.clearInterval(intervalId);
-  }, [selectedConcept, isDiscussionPage]);
+  }, [selectedConcept, isDiscussionPage, isBlogPage]);
 
   const goToPrevVisual = () => {
     setPrevVisualIndex(activeVisualIndex);
