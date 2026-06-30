@@ -1,0 +1,688 @@
+# =============================================================================
+# OrionX promo website - CI/CD Pipeline
+# =============================================================================
+#
+# Comprehensive pipeline for static React.js website with:
+# - Code quality checks (lint, format, typecheck)
+# - Unit testing with coverage
+# - Security scanning (Snyk, Trivy)
+# - Docker image build (GHCR)
+# - GitHub Pages deployment with rollback
+# - OWASP ZAP security scanning
+#
+# WORKFLOW OVERVIEW:
+#
+#   ┌─────────────────┐   ┌─────────────────┐
+#   │  Lint & Format  │   │   Unit Tests    │  ← Stage 1 (parallel)
+#   └────────┬────────┘   └────────┬────────┘
+#            │                     │
+#            └──────────┬──────────┘
+#                       ▼
+#   ┌─────────────────┐   ┌─────────────────┐
+#   │  Build Artifact │   │  Security Scan  │  ← Stage 2 (parallel)
+#   └────────┬────────┘   └────────┬────────┘
+#            │                     │
+#            └──────────┬──────────┘
+#                       ▼
+#            ┌─────────────────┐
+#            │  Docker Build   │               ← Stage 3
+#            └────────┬────────┘
+#                     ▼
+#            ┌─────────────────┐
+#            │   Trivy Scan    │               ← Stage 4 (tag-only)
+#            └────────┬────────┘
+#                     ▼
+#            ┌─────────────────┐
+#            │  Deploy Pages   │               ← Stage 5 (tag-only)
+#            └────────┬────────┘
+#                     ▼
+#            ┌─────────────────┐
+#            │  Verify Deploy  │               ← Stage 6 (tag-only)
+#            └────────┬────────┘
+#                     ▼
+#            ┌─────────────────┐
+#            │   OWASP ZAP     │               ← Stage 7 (tag-only)
+#            └────────┬────────┘
+#                     ▼
+#            ┌─────────────────┐
+#            │  CI Summary     │               ← Stage 8 (always)
+#            └─────────────────┘
+#
+# TRIGGERS:
+# - Pull Request to main: Stages 1-3 (lint, test, build, security, docker)
+# - Push to main: Stages 1-3
+# - Tag push (v*): Full pipeline including deploy + security scans
+#
+# =============================================================================
+
+name: OrionX CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SITE_URL: "https://Code-iplier.github.io/orionx-promo-website"
+  SITE_ORIGIN: "https://Code-iplier.github.io"
+  BASE_PATH: "/orionx-promo-website"
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Stage 1A: Lint & Formatting (parallel with unit-tests)
+  # ===========================================================================
+  lint-quality:
+    name: Lint & Formatting
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check (TypeScript)
+        run: npm run typecheck
+
+      - name: Check formatting (Prettier)
+        run: npm run format:check
+
+      - name: Lint (ESLint)
+        id: lint
+        run: npm run lint
+
+      - name: Install ESLint SARIF formatter
+        if: always()
+        run: npm install --no-save @microsoft/eslint-formatter-sarif
+
+      - name: Generate ESLint SARIF
+        if: always()
+        run: npx eslint src/ -f @microsoft/eslint-formatter-sarif -o eslint.sarif || true
+
+      - name: Fail if lint failed
+        if: steps.lint.outcome == 'failure'
+        run: exit 1
+
+      - name: Upload ESLint SARIF artifact
+        if: always() && hashFiles('eslint.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-sarif
+          path: eslint.sarif
+
+      - name: Upload ESLint SARIF to Code Scanning
+        if: vars.ENABLE_CODE_SCANNING_SARIF == 'true' && always() && hashFiles('eslint.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: eslint.sarif
+
+  # ===========================================================================
+  # Stage 1B: Unit Tests (parallel with lint-quality)
+  # ===========================================================================
+  unit-tests:
+    name: Unit Tests
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:ci
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
+  # ===========================================================================
+  # Stage 2A: Build Artifact (parallel with security-scan)
+  # ===========================================================================
+  build-dist:
+    name: Build Artifact
+    runs-on: ubuntu-latest
+    needs: [lint-quality, unit-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static site
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: dist
+          retention-days: 7
+
+  # ===========================================================================
+  # Stage 2B: Security Scan (Snyk OSS) - parallel with build-dist
+  # ===========================================================================
+  security-scan:
+    name: Security Scan (Snyk)
+    runs-on: ubuntu-latest
+    needs: [lint-quality, unit-tests]
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Snyk CLI
+        if: env.SNYK_TOKEN != ''
+        uses: snyk/actions/setup@master
+
+      - name: Snyk Open Source scan
+        if: env.SNYK_TOKEN != ''
+        id: snyk
+        run: |
+          snyk auth "$SNYK_TOKEN"
+          snyk test \
+            --severity-threshold=high \
+            --sarif-file-output=snyk.sarif || true
+
+      - name: Upload Snyk SARIF to Code Scanning
+        if: vars.ENABLE_CODE_SCANNING_SARIF == 'true' && env.SNYK_TOKEN != '' && always() && hashFiles('snyk.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk.sarif
+
+      - name: Upload Snyk SARIF artifact
+        if: env.SNYK_TOKEN != '' && always() && hashFiles('snyk.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sarif
+          path: snyk.sarif
+
+      - name: npm audit fallback (if no Snyk token)
+        if: env.SNYK_TOKEN == ''
+        run: |
+          echo "⚠️ SNYK_TOKEN not configured - running npm audit instead"
+          npm audit --omit=dev --audit-level=high || echo "::warning::Security vulnerabilities found - please review"
+
+  # ===========================================================================
+  # Stage 3: Docker Build (GHCR)
+  # ===========================================================================
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [build-dist, security-scan]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BASE_PATH=${{ env.BASE_PATH }}
+            SITE_URL=${{ env.SITE_URL }}
+
+  # ===========================================================================
+  # Stage 4: Trivy Vulnerability Scan (tag-only)
+  # ===========================================================================
+  trivy-scan:
+    name: Trivy Scan
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+
+      - name: Run Trivy vulnerability scanner (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: "sarif"
+          output: "trivy.sarif"
+
+      - name: Upload Trivy SARIF to Code Scanning
+        if: vars.ENABLE_CODE_SCANNING_SARIF == 'true' && always() && hashFiles('trivy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+
+      - name: Run Trivy vulnerability scanner (JSON)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: "json"
+          output: "trivy-results.json"
+
+      - name: Upload Trivy report artifact
+        if: always() && hashFiles('trivy-results.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-results.json
+
+  # ===========================================================================
+  # Stage 5: Deploy to GitHub Pages (tag-only)
+  # ===========================================================================
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, build-dist, security-scan]
+    permissions:
+      contents: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ env.SITE_URL }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: dist
+
+      - name: Record current gh-pages HEAD (for rollback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREV_SHA=$(git ls-remote --heads origin gh-pages | awk '{print $1}' | head -n1 || true)
+          echo "PREV_GHPAGES_SHA=$PREV_SHA" >> "$GITHUB_ENV"
+          echo "Previous gh-pages SHA: ${PREV_SHA:-'(none - first deployment)'}"
+
+      - name: Add .nojekyll file
+        run: touch dist/.nojekyll
+
+      - name: Deploy with gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          npx --yes gh-pages -d dist -b gh-pages -t \
+            -r https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git \
+            -u "github-actions <github-actions@github.com>"
+          echo "✅ Deployed to gh-pages branch"
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${{ env.SITE_URL }}/"
+          ORIGIN="${{ env.SITE_ORIGIN }}"
+          echo "🔍 Checking $URL ..."
+          for i in {1..24}; do
+            if ! curl -fsS -o index_out.html "$URL"; then
+              echo "Attempt $i: index fetch failed"; sleep 10; continue
+            fi
+            MAIN_JS=$(grep -Eo 'src="[^"]*\.js"' index_out.html | head -n1 | sed -E 's/src="([^"]+)"/\1/') || true
+            MAIN_CSS=$(grep -Eo 'href="[^"]*\.css"' index_out.html | head -n1 | sed -E 's/href="([^"]+)"/\1/') || true
+            make_abs() {
+              local p="$1"
+              if [[ -z "$p" ]]; then echo ""
+              elif [[ "$p" =~ ^https?:// ]]; then echo "$p"
+              elif [[ "$p" =~ ^/ ]]; then echo "${ORIGIN}$p"
+              else echo "${URL%/}/$p"
+              fi
+            }
+            JS_URL=$(make_abs "${MAIN_JS:-}")
+            CSS_URL=$(make_abs "${MAIN_CSS:-}")
+            JS_OK=false; CSS_OK=false
+            if [ -n "${JS_URL}" ]; then curl -fsSLI "$JS_URL" | grep -q "^HTTP/.* 200" && JS_OK=true || JS_OK=false; fi
+            if [ -n "${CSS_URL}" ]; then curl -fsSLI "$CSS_URL" | grep -q "^HTTP/.* 200" && CSS_OK=true || CSS_OK=false; fi
+            if $JS_OK && $CSS_OK; then
+              echo "✅ Health check passed on attempt $i (JS: $JS_URL, CSS: $CSS_URL)"
+              rm -f index_out.html
+              exit 0
+            fi
+            echo "Attempt $i: JS_OK=$JS_OK CSS_OK=$CSS_OK (retrying)"; sleep 10
+          done
+          echo "❌ Health check failed after retries"
+          cat index_out.html || true
+          exit 1
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          npm install --no-save playwright@latest
+          npx --yes playwright install --with-deps chromium
+
+      - name: Run Playwright smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          export URL="${{ env.SITE_URL }}/"
+          cat > smoke.cjs << 'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch();
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            const consoleErrors = [];
+            page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+            const targetUrl = process.env.URL;
+            console.log('Testing URL:', targetUrl);
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            try {
+              await page.waitForFunction(() => {
+                return document.body && document.body.textContent && document.body.textContent.trim().length > 0;
+              }, { timeout: 15000 });
+            } catch (e) {
+              await browser.close();
+              console.error('Smoke: page content did not render in time');
+              process.exit(1);
+            }
+            if (consoleErrors.length > 0) {
+              await browser.close();
+              console.error('Smoke: console errors detected:\n' + consoleErrors.join('\n'));
+              process.exit(1);
+            }
+            await browser.close();
+            console.log('✅ Smoke test passed: page rendered without console errors');
+          })();
+          JS
+          node smoke.cjs
+
+      - name: Auto rollback on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PREV_GHPAGES_SHA:-}" ]; then
+            echo "⚠️ No previous gh-pages SHA found; cannot rollback"
+            exit 1
+          fi
+          echo "🔄 Rolling back gh-pages to $PREV_GHPAGES_SHA"
+          git fetch --prune origin gh-pages
+          if git show-ref --verify --quiet refs/heads/gh-pages; then
+            git checkout gh-pages
+          else
+            git checkout -b gh-pages origin/gh-pages
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git reset --hard "$PREV_GHPAGES_SHA"
+          git push origin gh-pages --force
+          echo "✅ Rollback complete"
+
+  # ===========================================================================
+  # Stage 6: Verify Deployed Tag (tag-only)
+  # ===========================================================================
+  verify-deployed-tag:
+    name: Verify Deployed Tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [deploy-pages]
+    steps:
+      - name: Verify deployed version matches tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${{ env.SITE_URL }}/"
+          EXPECTED="${{ github.ref_name }}"
+          echo "Expected version (git tag): $EXPECTED"
+          echo "Waiting 15s before verification..."
+          sleep 15
+
+          DEPLOYED=""
+          for i in {1..3}; do
+            echo "Fetch attempt $i ..."
+            HTML="$(curl --retry 3 --retry-delay 5 -fsSL "$URL" || true)"
+            if [ -n "${HTML:-}" ]; then
+              # Extract the app-version meta tag content more precisely
+              # Match: <meta name="app-version" content="vX.X.X"/>
+              DEPLOYED="$(echo "$HTML" | grep -oP '(?<=<meta name="app-version" content=")[^"]+' | head -1)" || true
+              DEPLOYED="$(echo -n "${DEPLOYED:-}" | tr -d "\r\n")"
+            fi
+            if [ -n "$DEPLOYED" ]; then break; fi
+            if [ "$i" -lt 3 ]; then
+              echo "Meta app-version not found yet; waiting 5s before retry..."
+              sleep 5
+            fi
+          done
+
+          if [ -z "$DEPLOYED" ]; then
+            echo "❌ No <meta name=\"app-version\" content=\"...\"> found after 3 attempts"
+            exit 1
+          fi
+
+          echo "Deployed version (meta): $DEPLOYED"
+          if [ "$DEPLOYED" != "$EXPECTED" ]; then
+            echo "❌ Version mismatch: deployed=$DEPLOYED expected=$EXPECTED"
+            exit 1
+          fi
+          echo "✅ Deployed version matches tag: $EXPECTED"
+
+  # ===========================================================================
+  # Stage 7: OWASP ZAP Production Scan (tag-only)
+  # ===========================================================================
+  zap-production-dast:
+    name: OWASP ZAP Scan
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [deploy-pages]
+    steps:
+      - name: OWASP ZAP Baseline on Production
+        run: |
+          docker run --rm -v $(pwd):/zap/wrk -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "${{ env.SITE_URL }}/" \
+            -J zap-production.json -w zap-production.md -r zap-production.html -a \
+            > zap-baseline.log 2>&1 || true
+
+      - name: Ensure ZAP artifacts exist
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f zap-baseline.log ]; then
+            cat zap-baseline.log
+          fi
+          for file in zap-production.html zap-production.json zap-production.md; do
+            if [ ! -f "$file" ] || [ ! -s "$file" ]; then
+              echo "ZAP output $file missing; creating placeholder."
+              case "$file" in
+                *.html)
+                  printf '%s\n' \
+                    '<!DOCTYPE html>' \
+                    '<html lang="en">' \
+                    '  <head><meta charset="utf-8"><title>ZAP Baseline Report</title></head>' \
+                    '  <body>' \
+                    '    <h1>ZAP Baseline Report</h1>' \
+                    '    <p>No report was generated during this run.</p>' \
+                    '  </body>' \
+                    '</html>' > "$file"
+                  ;;
+                *.json)
+                  echo '{ "message": "No ZAP baseline JSON report was generated in this run." }' > "$file"
+                  ;;
+                *.md)
+                  echo "# ZAP Baseline Report" > "$file"
+                  echo "_No report was generated during this run._" >> "$file"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Upload ZAP Production report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-production
+          path: |
+            zap-production.html
+            zap-production.json
+            zap-production.md
+
+  # ===========================================================================
+  # Stage 8: CI Summary & Report Bundle
+  # ===========================================================================
+  reports-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    needs:
+      [
+        lint-quality,
+        unit-tests,
+        build-dist,
+        security-scan,
+        docker-build,
+        trivy-scan,
+        deploy-pages,
+        verify-deployed-tag,
+        zap-production-dast,
+      ]
+    if: always()
+    steps:
+      - name: Create CI summary
+        run: |
+          IS_DEPLOY="${{ startsWith(github.ref, 'refs/tags/v') }}"
+          {
+            echo "# 🚀 OrionX – CI Report"
+            echo ""
+            echo "## 📋 Build Information"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
+            echo "| Branch/Tag | \`${GITHUB_REF##*/}\` |"
+            echo "| Triggered by | ${{ github.event_name }} |"
+            echo "| Site URL | ${{ env.SITE_URL }} |"
+            echo ""
+            echo "## 📊 Job Results"
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| Lint & Formatting | ${{ needs.lint-quality.result == 'success' && '✅ Passed' || needs.lint-quality.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || needs.unit-tests.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Build Artifact | ${{ needs.build-dist.result == 'success' && '✅ Passed' || needs.build-dist.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Security Scan | ${{ needs.security-scan.result == 'success' && '✅ Passed' || needs.security-scan.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Docker Build | ${{ needs.docker-build.result == 'success' && '✅ Passed' || needs.docker-build.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            if [[ "$IS_DEPLOY" == "true" ]]; then
+              echo "| Trivy Scan | ${{ needs.trivy-scan.result == 'success' && '✅ Passed' || needs.trivy-scan.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+              echo "| Deploy to Pages | ${{ needs.deploy-pages.result == 'success' && '✅ Passed' || needs.deploy-pages.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+              echo "| Verify Deployed Tag | ${{ needs.verify-deployed-tag.result == 'success' && '✅ Passed' || needs.verify-deployed-tag.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+              echo "| OWASP ZAP Scan | ${{ needs.zap-production-dast.result == 'success' && '✅ Passed' || needs.zap-production-dast.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            fi
+          } > summary.md
+          cat summary.md >> $GITHUB_STEP_SUMMARY
+          cat summary.md
+
+      - name: Upload CI report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: summary.md
