@@ -267,46 +267,46 @@ const features = [
 const spaceVisuals = [
   {
     title: 'Space Astronaut',
-    image: '/space-visuals/visual-1.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-1.jpg',
     description: 'The coolest people to exist ever.',
   },
   {
     title: 'Planetary Horizon',
-    image: '/space-visuals/visual-2.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-2.jpg',
     description:
       'A cinematic planetary edge view showing atmosphere glow and orbital scale.',
   },
   {
     title: 'Galactic Core',
-    image: '/space-visuals/visual-3.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-3.jpg',
     description:
       'Dense star populations and dust lanes surrounding a dynamic galactic center.',
   },
   {
     title: 'Stellar Field',
-    image: '/space-visuals/visual-4.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-4.jpg',
     description:
       'Wide-angle star landscape built for immersive cosmic storytelling.',
   },
   {
     title: 'A Gassy Giant',
-    image: '/space-visuals/visual-5.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-5.jpg',
     description: 'Jupiter the largest planet in our solar system.',
   },
   {
     title: 'Interstellar Wormhole',
-    image: '/space-visuals/visual-6.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-6.jpg',
     description: 'A Stunning space shortcut, a tunnel through spacetime.',
   },
   {
     title: 'Black Holes',
-    image: '/space-visuals/visual-7.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-7.jpg',
     description:
       'A space object so dense, that its gravitational pull does not even let light escape',
   },
   {
     title: 'Aurora Orbit',
-    image: '/space-visuals/visual-8.jpg',
+    image: import.meta.env.BASE_URL + 'space-visuals/visual-8.jpg',
     description:
       'A wide, cinematic space panorama built for OrionX storytelling visuals.',
   },
@@ -628,7 +628,10 @@ export default function App() {
             objectFit: 'cover',
           }}
         >
-          <source src="/hero-background.mp4" type="video/mp4" />
+          <source
+            src={import.meta.env.BASE_URL + 'hero-background.mp4'}
+            type="video/mp4"
+          />
         </Box>
         <Box
           component="audio"
@@ -637,7 +640,10 @@ export default function App() {
           preload="auto"
           sx={{ display: 'none' }}
         >
-          <source src="/hero-audio.mp3" type="audio/mpeg" />
+          <source
+            src={import.meta.env.BASE_URL + 'hero-audio.mp3'}
+            type="audio/mpeg"
+          />
         </Box>
       </Box>
 
