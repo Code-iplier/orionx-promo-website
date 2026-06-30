@@ -192,6 +192,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Inject app version
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          sed -i "s/__APP_VERSION__/$VERSION/" index.html
+
       - name: Build static site
         run: npm run build
 
